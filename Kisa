@@ -1,0 +1,67 @@
+using System;
+using System.Text.RegularExpressions;
+
+public class CPHInline 
+{
+    public bool Execute() 
+    {
+        // Hole die TikTok URL aus verschiedenen Quellen
+        string input = "";
+        string userName = "";
+        string inputSource = "";
+        
+        // Prüfe ob es ein Chat Command ist
+        if (CPH.TryGetArg("input0", out object inputValue) && !string.IsNullOrEmpty(inputValue.ToString()))
+        {
+            input = inputValue.ToString();
+            inputSource = "command";
+        }
+        // Prüfe ob es ein Channel Point Reward ist
+        else if (CPH.TryGetArg("rewardRedemptionMessage", out object rewardMessageValue) && !string.IsNullOrEmpty(rewardMessageValue.ToString()))
+        {
+            input = rewardMessageValue.ToString();
+            inputSource = "reward";
+        }
+        // Alternative für Channel Point Rewards (je nach StreamerBot Version)
+        else if (CPH.TryGetArg("message", out object messageValue) && !string.IsNullOrEmpty(messageValue.ToString()))
+        {
+            input = messageValue.ToString();
+            inputSource = "reward";
+        }
+        
+        // Hole Username
+        if (CPH.TryGetArg("userName", out object userValue))
+        {
+            userName = userValue.ToString();
+        }
+        else if (CPH.TryGetArg("user", out object userValue2))
+        {
+            userName = userValue2.ToString();
+        }
+        
+        // Prüfe ob eine URL eingegeben wurde
+        if (string.IsNullOrEmpty(input)) 
+        {
+            string helpMessage = inputSource == "reward" 
+                ? "@" + userName + " Du musst eine TikTok URL in deine Channel Point Nachricht eingeben!"
+                : "@" + userName + " Du musst eine TikTok URL angeben! Beispiel: !tiktok https://www.tiktok.com/@user/video/123456";
+                
+            CPH.SendMessage(helpMessage, true);
+            return false;
+        }
+        
+        // Prüfe ob es eine gültige TikTok URL ist
+        if (!input.Contains("tiktok.com") || !input.Contains("video")) 
+        {
+            CPH.SendMessage("@" + userName + " Das ist keine gültige TikTok URL!", true);
+            return false;
+        }
+        
+        // Speichere die URL für die nächsten Steps
+        CPH.SetArgument("tiktokUrl", input);
+        CPH.SetArgument("requestUser", userName);
+        CPH.SetArgument("inputSource", inputSource);
+        
+        return true;
+    }
+}
