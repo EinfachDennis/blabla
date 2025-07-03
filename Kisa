@@ -5,6 +5,13 @@ public class CPHInline
 {
     public bool Execute() 
     {
+        // Debug: Alle verfügbaren Arguments loggen
+        CPH.LogInfo("=== TikTok Request Debug ===");
+        foreach(var arg in args)
+        {
+            CPH.LogInfo($"Argument: {arg.Key} = {arg.Value}");
+        }
+        
         // Hole die TikTok URL aus verschiedenen Quellen
         string input = "";
         string userName = "";
@@ -13,23 +20,31 @@ public class CPHInline
         // Prüfe ob es ein Chat Command ist
         if (CPH.TryGetArg("input0", out object inputValue) && !string.IsNullOrEmpty(inputValue.ToString()))
         {
-            input = inputValue.ToString();
+            input = inputValue.ToString().Trim();
             inputSource = "command";
+            CPH.LogInfo($"Found input from command: {input}");
         }
-        // Prüfe ob es ein Channel Point Reward ist
+        // Prüfe ob es ein Channel Point Reward ist - verschiedene Parameter testen
         else if (CPH.TryGetArg("rewardRedemptionMessage", out object rewardMessageValue) && !string.IsNullOrEmpty(rewardMessageValue.ToString()))
         {
-            input = rewardMessageValue.ToString();
+            input = rewardMessageValue.ToString().Trim();
             inputSource = "reward";
+            CPH.LogInfo($"Found input from rewardRedemptionMessage: {input}");
         }
-        // Alternative für Channel Point Rewards (je nach StreamerBot Version)
         else if (CPH.TryGetArg("message", out object messageValue) && !string.IsNullOrEmpty(messageValue.ToString()))
         {
-            input = messageValue.ToString();
+            input = messageValue.ToString().Trim();
             inputSource = "reward";
+            CPH.LogInfo($"Found input from message: {input}");
+        }
+        else if (CPH.TryGetArg("rawInput", out object rawInputValue) && !string.IsNullOrEmpty(rawInputValue.ToString()))
+        {
+            input = rawInputValue.ToString().Trim();
+            inputSource = "chat";
+            CPH.LogInfo($"Found input from rawInput: {input}");
         }
         
-        // Hole Username
+        // Hole Username aus verschiedenen Quellen
         if (CPH.TryGetArg("userName", out object userValue))
         {
             userName = userValue.ToString();
@@ -38,6 +53,12 @@ public class CPHInline
         {
             userName = userValue2.ToString();
         }
+        else if (CPH.TryGetArg("displayName", out object displayValue))
+        {
+            userName = displayValue.ToString();
+        }
+        
+        CPH.LogInfo($"Username: {userName}, Input: '{input}', Source: {inputSource}");
         
         // Prüfe ob eine URL eingegeben wurde
         if (string.IsNullOrEmpty(input)) 
@@ -47,13 +68,37 @@ public class CPHInline
                 : "@" + userName + " Du musst eine TikTok URL angeben! Beispiel: !tiktok https://www.tiktok.com/@user/video/123456";
                 
             CPH.SendMessage(helpMessage, true);
+            CPH.LogInfo("Error: No input provided");
             return false;
         }
         
-        // Prüfe ob es eine gültige TikTok URL ist
-        if (!input.Contains("tiktok.com") || !input.Contains("video")) 
+        // Erweiterte TikTok URL Validierung - verschiedene Formate unterstützen
+        bool isValidTikTok = false;
+        
+        // Verschiedene TikTok URL Formate prüfen
+        if (input.Contains("tiktok.com") && input.Contains("video"))
         {
-            CPH.SendMessage("@" + userName + " Das ist keine gültige TikTok URL!", true);
+            isValidTikTok = true;
+        }
+        else if (input.Contains("vm.tiktok.com")) // Kurze TikTok Links
+        {
+            isValidTikTok = true;
+        }
+        else if (input.Contains("tiktok.com/@") && input.Contains("/"))
+        {
+            isValidTikTok = true;
+        }
+        else if (Regex.IsMatch(input, @"tiktok\.com.*[/@].*", RegexOptions.IgnoreCase))
+        {
+            isValidTikTok = true;
+        }
+        
+        CPH.LogInfo($"URL validation result: {isValidTikTok} for URL: {input}");
+        
+        if (!isValidTikTok) 
+        {
+            CPH.SendMessage("@" + userName + " Das ist keine gültige TikTok URL! Akzeptierte Formate: tiktok.com/@user/video/..., vm.tiktok.com/...", true);
+            CPH.LogInfo("Error: Invalid TikTok URL format");
             return false;
         }
         
@@ -61,6 +106,8 @@ public class CPHInline
         CPH.SetArgument("tiktokUrl", input);
         CPH.SetArgument("requestUser", userName);
         CPH.SetArgument("inputSource", inputSource);
+        
+        CPH.LogInfo($"Success: URL accepted and arguments set");
         
         return true;
     }
