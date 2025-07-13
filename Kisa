@@ -1,114 +1,406 @@
 using System;
-using System.Text.RegularExpressions;
+using System.Collections.Generic;
+using System.Net.Http;
+using System.Threading.Tasks;
+using System.Linq;
+using Newtonsoft.Json.Linq;
 
-public class CPHInline 
+public class CPHInline
 {
-    public bool Execute() 
+    private static HttpClient httpClient = new HttpClient();
+    
+    public bool Execute()
     {
-        // Debug: Alle verfügbaren Arguments loggen
-        CPH.LogInfo("=== TikTok Request Debug ===");
-        foreach(var arg in args)
+        try
         {
-            CPH.LogInfo($"Argument: {arg.Key} = {arg.Value}");
+            // Set Arguments auslesen
+            string steamUserId = args.ContainsKey("steamUserId") ? args["steamUserId"].ToString() : "";
+            string steamApiKey = args.ContainsKey("steamApiKey") ? args["steamApiKey"].ToString() : "";
+            bool requireStreamLive = args.ContainsKey("requireStreamLive") ? bool.Parse(args["requireStreamLive"].ToString()) : false;
+            bool enableChatMessages = args.ContainsKey("enableChatMessages") ? bool.Parse(args["enableChatMessages"].ToString()) : true;
+            
+            // Validierung der erforderlichen Parameter
+            if (string.IsNullOrEmpty(steamUserId) || string.IsNullOrEmpty(steamApiKey))
+            {
+                CPH.LogWarn("❌ Steam User ID und Steam API Key sind erforderlich!");
+                if (enableChatMessages)
+                {
+                    CPH.SendMessage("❌ Steam Konfiguration fehlt!");
+                }
+                return false;
+            }
+            
+            // Stream-Status prüfen falls erforderlich
+            if (requireStreamLive)
+            {
+                bool isStreaming = CPH.ObsIsStreaming();
+                if (!isStreaming)
+                {
+                    CPH.LogInfo("⏸️ Stream ist nicht live - Script pausiert");
+                    return true;
+                }
+            }
+            
+            CPH.LogInfo($"🔍 Intelligenter Game Category Check gestartet...");
+            
+            // Async Game Check starten
+            Task.Run(() => IntelligentGameCheckAsync(steamUserId, steamApiKey, enableChatMessages));
+            
+            return true;
         }
-        
-        // Hole die TikTok URL aus verschiedenen Quellen
-        string input = "";
-        string userName = "";
-        string inputSource = "";
-        
-        // Prüfe ob es ein Chat Command ist
-        if (CPH.TryGetArg("input0", out object inputValue) && !string.IsNullOrEmpty(inputValue.ToString()))
+        catch (Exception ex)
         {
-            input = inputValue.ToString().Trim();
-            inputSource = "command";
-            CPH.LogInfo($"Found input from command: {input}");
+            CPH.LogError($"❌ Fehler beim Initialisieren: {ex.Message}");
+            return false;
         }
-        // Prüfe ob es ein Channel Point Reward ist - verschiedene Parameter testen
-        else if (CPH.TryGetArg("rewardRedemptionMessage", out object rewardMessageValue) && !string.IsNullOrEmpty(rewardMessageValue.ToString()))
+    }
+    
+    private async Task IntelligentGameCheckAsync(string steamUserId, string steamApiKey, bool enableChatMessages)
+    {
+        try
         {
-            input = rewardMessageValue.ToString().Trim();
-            inputSource = "reward";
-            CPH.LogInfo($"Found input from rewardRedemptionMessage: {input}");
-        }
-        else if (CPH.TryGetArg("message", out object messageValue) && !string.IsNullOrEmpty(messageValue.ToString()))
-        {
-            input = messageValue.ToString().Trim();
-            inputSource = "reward";
-            CPH.LogInfo($"Found input from message: {input}");
-        }
-        else if (CPH.TryGetArg("rawInput", out object rawInputValue) && !string.IsNullOrEmpty(rawInputValue.ToString()))
-        {
-            input = rawInputValue.ToString().Trim();
-            inputSource = "chat";
-            CPH.LogInfo($"Found input from rawInput: {input}");
-        }
-        
-        // Hole Username aus verschiedenen Quellen
-        if (CPH.TryGetArg("userName", out object userValue))
-        {
-            userName = userValue.ToString();
-        }
-        else if (CPH.TryGetArg("user", out object userValue2))
-        {
-            userName = userValue2.ToString();
-        }
-        else if (CPH.TryGetArg("displayName", out object displayValue))
-        {
-            userName = displayValue.ToString();
-        }
-        
-        CPH.LogInfo($"Username: {userName}, Input: '{input}', Source: {inputSource}");
-        
-        // Prüfe ob eine URL eingegeben wurde
-        if (string.IsNullOrEmpty(input)) 
-        {
-            string helpMessage = inputSource == "reward" 
-                ? "@" + userName + " Du musst eine TikTok URL in deine Channel Point Nachricht eingeben!"
-                : "@" + userName + " Du musst eine TikTok URL angeben! Beispiel: !tiktok https://www.tiktok.com/@user/video/123456";
+            // 1. Aktuelles Steam-Spiel abrufen
+            string currentSteamGame = await GetCurrentSteamGame(steamUserId, steamApiKey);
+            
+            if (string.IsNullOrEmpty(currentSteamGame))
+            {
+                CPH.LogInfo("ℹ️ Kein Steam-Spiel aktiv - keine Kategorie-Änderung nötig");
+                return;
+            }
+            
+            // 2. Prüfen ob dieses Spiel bereits verarbeitet wurde
+            if (IsGameAlreadyProcessed(currentSteamGame))
+            {
+                CPH.LogInfo($"⏭️ Spiel '{currentSteamGame}' bereits verarbeitet - überspringe");
+                return; // Kein Chat-Feedback bei bereits verarbeiteten Spielen
+            }
+            
+            CPH.LogInfo($"🎮 Steam-Spiel erkannt: {currentSteamGame}");
+            
+            // 3. Aktuelle Twitch-Kategorie abrufen
+            string currentTwitchCategory = await GetCurrentTwitchCategory();
+            
+            if (string.IsNullOrEmpty(currentTwitchCategory))
+            {
+                CPH.LogWarn("⚠️ Konnte aktuelle Twitch-Kategorie nicht abrufen");
+                currentTwitchCategory = "Unbekannt";
+            }
+            
+            CPH.LogInfo($"📺 Aktuelle Twitch-Kategorie: {currentTwitchCategory}");
+            
+            // 4. Intelligenter Vergleich
+            if (AreGamesEquivalent(currentSteamGame, currentTwitchCategory))
+            {
+                CPH.LogInfo($"✅ Kategorie ist bereits korrekt: {currentTwitchCategory}");
+                CPH.LogInfo("📝 Keine Änderung erforderlich");
                 
-            CPH.SendMessage(helpMessage, true);
-            CPH.LogInfo("Error: No input provided");
+                // Spiel als verarbeitet markieren (bereits korrekte Kategorie)
+                MarkGameAsProcessed(currentSteamGame);
+                return;
+            }
+            
+            // 5. Kategorie ändern da Unterschied erkannt
+            CPH.LogInfo($"🔄 Kategorie-Änderung erforderlich:");
+            CPH.LogInfo($"   Von: {currentTwitchCategory}");
+            CPH.LogInfo($"   Zu:  {currentSteamGame}");
+            
+            bool success = SetTwitchCategory(currentSteamGame);
+            
+            // 6. Spiel als verarbeitet markieren (egal ob erfolgreich oder nicht)
+            MarkGameAsProcessed(currentSteamGame);
+            
+            if (success)
+            {
+                CPH.LogInfo($"✅ Twitch-Kategorie erfolgreich geändert → {currentSteamGame}");
+                
+                if (enableChatMessages)
+                {
+                    CPH.SendMessage($"🎮 Kategorie automatisch geändert → {currentSteamGame}");
+                }
+            }
+            else
+            {
+                CPH.LogError($"❌ Fehler beim Ändern der Twitch-Kategorie: {currentSteamGame}");
+                
+                if (enableChatMessages)
+                {
+                    CPH.SendMessage($"❌ Kategorie '{currentSteamGame}' konnte nicht gesetzt werden");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            CPH.LogError($"❌ Fehler beim intelligenten Game Check: {ex.Message}");
+        }
+    }
+    
+    private bool IsGameAlreadyProcessed(string gameName)
+    {
+        try
+        {
+            // Lade das aktuell verarbeitete Spiel
+            string currentProcessedGame = CPH.GetGlobalVar<string>("currentProcessedGame", false) ?? "";
+            
+            // Prüfe ob das aktuelle Spiel bereits verarbeitet wurde
+            if (string.Equals(currentProcessedGame, gameName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            
+            // Neues Spiel erkannt - gib das vorherige frei
+            if (!string.IsNullOrEmpty(currentProcessedGame) && 
+                !string.Equals(currentProcessedGame, gameName, StringComparison.OrdinalIgnoreCase))
+            {
+                CPH.LogInfo($"🔄 Neues Spiel erkannt - gib '{currentProcessedGame}' frei für '{gameName}'");
+                CPH.SetGlobalVar("currentProcessedGame", "", false); // Vorheriges Spiel freigeben
+            }
+            
             return false;
         }
-        
-        // Erweiterte TikTok URL Validierung - verschiedene Formate unterstützen
-        bool isValidTikTok = false;
-        
-        // Verschiedene TikTok URL Formate prüfen
-        if (input.Contains("tiktok.com") && input.Contains("video"))
+        catch (Exception ex)
         {
-            isValidTikTok = true;
-        }
-        else if (input.Contains("vm.tiktok.com")) // Kurze TikTok Links
-        {
-            isValidTikTok = true;
-        }
-        else if (input.Contains("tiktok.com/@") && input.Contains("/"))
-        {
-            isValidTikTok = true;
-        }
-        else if (Regex.IsMatch(input, @"tiktok\.com.*[/@].*", RegexOptions.IgnoreCase))
-        {
-            isValidTikTok = true;
-        }
-        
-        CPH.LogInfo($"URL validation result: {isValidTikTok} for URL: {input}");
-        
-        if (!isValidTikTok) 
-        {
-            CPH.SendMessage("@" + userName + " Das ist keine gültige TikTok URL! Akzeptierte Formate: tiktok.com/@user/video/..., vm.tiktok.com/...", true);
-            CPH.LogInfo("Error: Invalid TikTok URL format");
+            CPH.LogError($"❌ Fehler beim Prüfen des verarbeiteten Spiels: {ex.Message}");
             return false;
         }
+    }
+    
+    private void MarkGameAsProcessed(string gameName)
+    {
+        try
+        {
+            // Setze das aktuelle Spiel als verarbeitet
+            CPH.SetGlobalVar("currentProcessedGame", gameName, false);
+            CPH.LogInfo($"📝 Spiel '{gameName}' als aktuell verarbeitetes Spiel markiert");
+        }
+        catch (Exception ex)
+        {
+            CPH.LogError($"❌ Fehler beim Markieren des Spiels: {ex.Message}");
+        }
+    }
+    
+    private async Task<string> GetCurrentSteamGame(string steamUserId, string steamApiKey)
+    {
+        try
+        {
+            string url = $"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key={steamApiKey}&steamids={steamUserId}";
+            
+            CPH.LogInfo($"🌐 Steam API Aufruf für User: {steamUserId}");
+            
+            HttpResponseMessage response = await httpClient.GetAsync(url);
+            string content = await response.Content.ReadAsStringAsync();
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                CPH.LogError($"❌ Steam API Fehler: {response.StatusCode}");
+                return null;
+            }
+            
+            JObject jsonResponse = JObject.Parse(content);
+            
+            var players = jsonResponse["response"]?["players"];
+            if (players != null && players.HasValues)
+            {
+                var player = players.First;
+                var gameInfo = player["gameextrainfo"];
+                
+                if (gameInfo != null)
+                {
+                    return gameInfo.ToString();
+                }
+            }
+            
+            return null;
+        }
+        catch (Exception ex)
+        {
+            CPH.LogError($"❌ Fehler beim Steam API Aufruf: {ex.Message}");
+            return null;
+        }
+    }
+    
+    private async Task<string> GetCurrentTwitchCategory()
+    {
+        try
+        {
+            // Versuche aus Global Variables zu lesen (falls verfügbar)
+            string cachedCategory = CPH.GetGlobalVar<string>("currentTwitchCategory", false) ?? "";
+            
+            // Da StreamerBot noch keine native GetChannelInfo Methode hat,
+            // verwenden wir direkte Twitch API Abfrage
+            string category = await GetTwitchCategoryViaAPI();
+            
+            if (!string.IsNullOrEmpty(category))
+            {
+                // Cache für nächsten Aufruf
+                CPH.SetGlobalVar("currentTwitchCategory", category, false);
+                return category;
+            }
+            
+            // Fallback auf gecachte Version
+            if (!string.IsNullOrEmpty(cachedCategory))
+            {
+                CPH.LogInfo("📦 Verwende gecachte Twitch-Kategorie");
+                return cachedCategory;
+            }
+            
+            return null;
+        }
+        catch (Exception ex)
+        {
+            CPH.LogError($"❌ Fehler beim Abrufen der Twitch-Kategorie: {ex.Message}");
+            return null;
+        }
+    }
+    
+    private async Task<string> GetTwitchCategoryViaAPI()
+    {
+        try
+        {
+            // Hier würde eine direkte Twitch API Abfrage stehen
+            // Da wir StreamerBot's Token-System nutzen müssen, verwenden wir eine einfachere Lösung
+            CPH.LogInfo("🔍 Prüfe Twitch-Kategorie...");
+            
+            // Placeholder - in einer echten Implementierung würde hier die Twitch API aufgerufen
+            // return await CallTwitchChannelAPI();
+            
+            return null; // Wird durch Fallback-Logic gehandelt
+        }
+        catch (Exception ex)
+        {
+            CPH.LogError($"❌ Twitch API Aufruf fehlgeschlagen: {ex.Message}");
+            return null;
+        }
+    }
+    
+    private bool AreGamesEquivalent(string steamGame, string twitchCategory)
+    {
+        if (string.IsNullOrEmpty(steamGame) || string.IsNullOrEmpty(twitchCategory))
+            return false;
         
-        // Speichere die URL für die nächsten Steps
-        CPH.SetArgument("tiktokUrl", input);
-        CPH.SetArgument("requestUser", userName);
-        CPH.SetArgument("inputSource", inputSource);
+        // Direkte Übereinstimmung
+        if (steamGame.Equals(twitchCategory, StringComparison.OrdinalIgnoreCase))
+            return true;
         
-        CPH.LogInfo($"Success: URL accepted and arguments set");
+        // Bekannte Spiel-Aliase und Variationen
+        var gameAliases = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "Counter-Strike 2", new[] { "CS2", "Counter Strike 2", "CS:2" } },
+            { "Grand Theft Auto V", new[] { "GTA V", "GTA 5", "GTA5" } },
+            { "Call of Duty: Modern Warfare III", new[] { "MW3", "Modern Warfare 3", "COD MW3" } },
+            { "Apex Legends", new[] { "Apex" } },
+            { "League of Legends", new[] { "LoL", "League" } },
+            { "Rocket League", new[] { "RL" } },
+            { "World of Warcraft", new[] { "WoW" } },
+            { "Overwatch 2", new[] { "OW2", "Overwatch" } }
+        };
         
-        return true;
+        // Prüfe Aliase in beide Richtungen
+        foreach (var entry in gameAliases)
+        {
+            string mainName = entry.Key;
+            string[] aliases = entry.Value;
+            
+            // Steam -> Twitch
+            if (steamGame.Equals(mainName, StringComparison.OrdinalIgnoreCase))
+            {
+                if (ContainsIgnoreCase(aliases, twitchCategory))
+                    return true;
+            }
+            
+            // Twitch -> Steam
+            if (twitchCategory.Equals(mainName, StringComparison.OrdinalIgnoreCase))
+            {
+                if (ContainsIgnoreCase(aliases, steamGame))
+                    return true;
+            }
+            
+            // Alias -> Alias
+            if (ContainsIgnoreCase(aliases, steamGame) && 
+                ContainsIgnoreCase(aliases, twitchCategory))
+                return true;
+        }
+        
+        // Fuzzy-Matching für ähnliche Namen
+        if (AreNamesSimilar(steamGame, twitchCategory))
+            return true;
+        
+        return false;
+    }
+    
+    private bool AreNamesSimilar(string name1, string name2)
+    {
+        // Entferne häufige Zusätze und normalisiere
+        string clean1 = CleanGameName(name1);
+        string clean2 = CleanGameName(name2);
+        
+        // Prüfe ob einer im anderen enthalten ist (mindestens 5 Zeichen)
+        if (clean1.Length >= 5 && clean2.Length >= 5)
+        {
+            if (clean1.IndexOf(clean2, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                clean2.IndexOf(clean1, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+        
+        return false;
+    }
+    
+    private string CleanGameName(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return "";
+        
+        // Entferne häufige Zusätze
+        string cleaned = name
+            .Replace("™", "")
+            .Replace("®", "")
+            .Replace("©", "")
+            .Replace(": Remastered", "")
+            .Replace(" - Definitive Edition", "")
+            .Replace(" (Early Access)", "")
+            .Replace(" Beta", "")
+            .Trim();
+        
+        return cleaned;
+    }
+    
+    private bool SetTwitchCategory(string gameName)
+    {
+        try
+        {
+            CPH.LogInfo($"🔧 Setze Twitch-Kategorie: {gameName}");
+            
+            var gameInfo = CPH.SetChannelGame(gameName);
+            
+            if (gameInfo != null)
+            {
+                // Cache die neue Kategorie
+                CPH.SetGlobalVar("currentTwitchCategory", gameName, false);
+                
+                CPH.LogInfo($"✅ Kategorie erfolgreich gesetzt: {gameName} (ID: {gameInfo.Id})");
+                return true;
+            }
+            else
+            {
+                CPH.LogWarn($"⚠️ Kategorie konnte nicht gesetzt werden: {gameName}");
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            CPH.LogError($"❌ Fehler beim Setzen der Kategorie: {ex.Message}");
+            return false;
+        }
+    }
+    
+    private bool ContainsIgnoreCase(string[] array, string value)
+    {
+        if (array == null || string.IsNullOrEmpty(value))
+            return false;
+            
+        foreach (string item in array)
+        {
+            if (string.Equals(item, value, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 }
